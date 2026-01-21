@@ -1,0 +1,39 @@
+{
+    "columns_finales": [
+        "CATEGORIA",
+        "UPC",
+        "DENOMINACION",
+        "DENOMINACION AXO",
+        "MARCA",
+        "LEYENDAS PRECAUTORIAS",
+        "INSTRUCCIONES DE USO",
+        "OBSERVACIONES",
+        "TAMAÑO DE LA DECLARACION DE CONTENIDO",
+        "CONTENIDO",
+        "PAIS ORIGEN",
+        "IMPORTADOR",
+        "NORMA",
+        "INGREDIENTES",
+        "MEDIDAS",
+        "TIPO DE ETIQUETA"
+    ],
+    "column_widths": {
+        "CATEGORIA": 15,
+        "UPC": 20,
+        "DENOMINACION": 40,
+        "DENOMINACION AXO": 35,
+        "MARCA": 25,
+        "LEYENDAS PRECAUTORIAS": 50,
+        "INSTRUCCIONES DE USO": 50,
+        "OBSERVACIONES": 30,
+        "TAMAÑO DE LA DECLARACION DE CONTENIDO": 25,
+        "CONTENIDO": 30,
+        "PAIS ORIGEN": 15,
+        "IMPORTADOR": 30,
+        "NORMA": 20,
+        "INGREDIENTES": 30,
+        "MEDIDAS": 20,
+        "TIPO DE ETIQUETA": 20
+    },
+    "row_height": 85
+}

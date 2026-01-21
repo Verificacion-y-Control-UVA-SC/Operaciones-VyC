@@ -1,0 +1,15 @@
+{
+    "header": {
+        "title": "Base de Etiquetado ULTA - AXO",
+        "color": "#ecd925"
+    },
+    "buttons": {
+        "width": 220,
+        "height": 30,
+        "corner_radius": 12
+    },
+    "fonts": {
+        "primary": "Inter",
+        "secondary": "Inter"
+    }
+}
