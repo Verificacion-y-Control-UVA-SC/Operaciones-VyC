@@ -1,0 +1,36 @@
+{
+  "window": {
+    "title": "📦 Tipo de Proceso – Versión 2",
+    "size": [550, 450],
+    "bg_color": "#FFFFFF"
+  },
+  "label": {
+    "font": ["Arial", 14, "bold"],
+    "fg_color": "#282828",
+    "bg_color": "#FFFFFF",
+    "padx": 10,
+    "pady": 10
+  },
+  "counter_frame": {
+    "bg_color": "#ecd925",
+    "padx": 20,
+    "pady": 20,
+    "border_width": 2,
+    "border_color": "#4d4d4d"
+  },
+  "counter_label": {
+    "font": ["Arial", 26, "bold"],
+    "fg_color": "#4d4d4d",
+    "bg_color": "#ecd925",
+    "padx": 20,
+    "pady": 20
+  },
+  "button": {
+    "font": ["Arial", 12, "bold"],
+    "fg_color": "#FFFFFF",
+    "bg_color": "#282828",
+    "hover_color": "#4d4d4d",
+    "padx": 20,
+    "pady": 12
+  }
+}
