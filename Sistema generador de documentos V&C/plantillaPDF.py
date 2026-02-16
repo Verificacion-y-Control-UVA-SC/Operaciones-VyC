@@ -22,7 +22,21 @@ def obtener_ruta_recurso(ruta_relativa):
     except Exception:
         # Si no existe _MEIPASS, estamos corriendo como .py normal
         ruta_base = os.path.abspath(".")
-    
+
+    # Si el usuario o la app definieron un directorio de datos, comprobarlo primero
+    try:
+        env_data = os.environ.get('IMAGENESVC_DATA_DIR') or os.environ.get('FOLIO_DATA_DIR')
+        if env_data:
+            # Si la ruta relativa empieza por 'data/', ajustamos la cola
+            tail = ruta_relativa
+            if ruta_relativa.startswith('data' + os.path.sep) or ruta_relativa.startswith('data/'):
+                tail = ruta_relativa.split(os.path.sep, 1)[-1] if os.path.sep in ruta_relativa else ruta_relativa.split('/', 1)[-1]
+            candidate = os.path.join(env_data, tail)
+            if os.path.exists(candidate):
+                return candidate
+    except Exception:
+        pass
+
     # Preferir carpeta `data` ubicada junto al ejecutable (APP_DIR) si existe.
     try:
         if getattr(sys, 'frozen', False):
@@ -30,9 +44,15 @@ def obtener_ruta_recurso(ruta_relativa):
         else:
             app_dir = os.path.abspath(".")
 
-        posible_externo = os.path.join(app_dir, ruta_relativa)
-        if os.path.exists(posible_externo):
-            return posible_externo
+        candidates = [
+            os.path.join(app_dir, ruta_relativa),
+            os.path.join(app_dir, '_internal', ruta_relativa),
+            os.path.join(ruta_base, ruta_relativa),
+            os.path.join(ruta_base, '_internal', ruta_relativa),
+        ]
+        for p in candidates:
+            if os.path.exists(p):
+                return p
     except Exception:
         pass
 
@@ -242,15 +262,31 @@ def validar_acreditacion_inspector(codigo_firma, norma_requerida, firmas_map):
         import re
         nums = re.findall(r"\d+", req) if req else []
         for na in normas_norm:
-            # coincidencia por substring
-            if req and req in na:
+            # coincidencia exacta
+            if req and req == na:
+                print(f"   ✅ Firma validada: {nombre} - {norma_requerida} == {na}")
+                return nombre, imagen, True
+
+            # coincidencia por substring (solo si la cadena de búsqueda es significativa)
+            if req and len(req) > 3 and req in na:
                 print(f"   ✅ Firma validada por substring: {nombre} - {norma_requerida} ~ {na}")
                 return nombre, imagen, True
-            # coincidencia por número (ej: '141' dentro de 'NOM-141-...')
-            for n in nums:
-                if n and n in na:
-                    print(f"   ✅ Firma validada por número: {nombre} - {norma_requerida} ~ {na}")
-                    return nombre, imagen, True
+
+            # coincidencia por número: comparar tokens numéricos completos para evitar
+            # que '4' coincida dentro de '141'. Normalizamos eliminando ceros a la izquierda.
+            try:
+                nums_na = re.findall(r"\d+", na) if na else []
+                for n in nums:
+                    if not n:
+                        continue
+                    n_norm = n.lstrip('0') or '0'
+                    for m in nums_na:
+                        m_norm = m.lstrip('0') or '0'
+                        if n_norm == m_norm:
+                            print(f"   ✅ Firma validada por número: {nombre} - {norma_requerida} ~ {na}")
+                            return nombre, imagen, True
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -341,19 +377,23 @@ def preparar_datos_familia(
     # FOLIO, SOLICITUD, LISTA
     folio = str(r0.get("FOLIO", "")).strip()
     solicitud_raw = str(r0.get("SOLICITUD", "")).strip()
-    # Extraer año desde la solicitud si viene en formato 'NNNNNN/YY' y usar esos dos
-    # dígitos como `year`. Si no existe, usar el año actual (dos dígitos).
-    year = ''
+    # Extraer año desde la solicitud si viene en formato 'NNNNNN/YY'
+    # y obtener los dos dígitos del sufijo. Pero para la cadena final
+    # usaremos el año actual para la parte UDC y el sufijo extraído
+    # para el prefijo de "Solicitud de Servicio".
+    solicitud_year_two = ''
     try:
         if '/' in solicitud_raw:
             parts = solicitud_raw.split('/')
             suf = parts[-1].strip()
             if suf.isdigit():
-                year = suf[-2:]
+                solicitud_year_two = suf[-2:]
     except Exception:
-        year = ''
-    if not year:
-        year = datetime.now().strftime("%y")
+        solicitud_year_two = ''
+
+    # Si no se obtuvo el sufijo desde la solicitud, usar el año actual
+    if not solicitud_year_two:
+        solicitud_year_two = datetime.now().strftime("%y")
 
     # Solicitud: tomar la parte antes de '/' y formatearla a 6 dígitos si es numérica
     solicitud = solicitud_raw.split('/')[0].strip()
@@ -378,7 +418,11 @@ def preparar_datos_familia(
 
     # Formatear folio a 6 dígitos para la cadena de identificación
     folio_disp = folio.zfill(6) if folio and str(folio).isdigit() else folio
-    cadena_identificacion = f"{year}049UDC{norma}{folio_disp} Solicitud de Servicio: {year}049USD{norma}{solicitud}-{lista}"
+    current_year_two = datetime.now().strftime("%y")
+    # `year` se expone en el dict devuelto; definirlo como el año usado
+    # en la parte UDC (año actual, dos dígitos) para mantener compatibilidad.
+    year = current_year_two
+    cadena_identificacion = f"{current_year_two}049UDC{norma}{folio_disp} Solicitud de Servicio: {solicitud_year_two}049USD{norma}{solicitud}-{lista}"
 
     def fecha_corta(f):
         try:
@@ -417,19 +461,35 @@ def preparar_datos_familia(
     print("   🔍 Iniciando generación de etiquetas...")
     generador_etiquetas = GeneradorEtiquetasDecathlon()
 
-    codigos = []
+    # Generar etiquetas usando clave compuesta para evitar reutilizar una etiqueta
+    # de otro registro que comparte el mismo código pero pertenece a distinta
+    # solicitud/marca/pais. Construimos una lista de entradas (dict) con los
+    # campos mínimos: codigo, solicitud, marca, pais_origen.
+    codigos_compuestos = []
     for r in registros:
-        codigo = r.get("CODIGO")
-        if codigo and str(codigo).strip() not in ("", "None", "nan"):
-            codigos.append(str(codigo).strip())
-    
-    print(f"   📋 Códigos encontrados: {codigos}")
+        codigo = r.get("CODIGO") or r.get('EAN') or r.get('Codigo')
+        if not codigo or str(codigo).strip() in ("", "None", "nan"):
+            continue
+        solicitud = r.get('SOLICITUD') or r.get('Solicitud') or r.get('solicitud') or ''
+        marca = r.get('MARCA') or r.get('Marca') or r.get('marca') or ''
+        pais = (
+            r.get('PAIS ORIGEN') or r.get('PAIS_DE_ORIGEN') or r.get('PAIS DE ORIGEN') or
+            r.get('PAIS') or r.get('PAIS ORIG') or ''
+        )
+        codigos_compuestos.append({
+            'codigo': str(codigo).strip(),
+            'solicitud': str(solicitud).strip(),
+            'marca': str(marca).strip(),
+            'pais_origen': str(pais).strip()
+        })
+
+    print(f"   📋 Claves compuestas encontradas: {len(codigos_compuestos)} entradas")
 
     etiquetas_generadas = []
-    if codigos:
+    if codigos_compuestos:
         try:
-            print(f"   🏷️ Generando etiquetas para {len(codigos)} códigos...")
-            etiquetas_generadas = generador_etiquetas.generar_etiquetas_por_codigos(codigos)
+            print(f"   🏷️ Generando etiquetas para {len(codigos_compuestos)} entradas (clave compuesta)...")
+            etiquetas_generadas = generador_etiquetas.generar_etiquetas_por_codigos(codigos_compuestos)
             print(f"   ✅ Etiquetas generadas: {len(etiquetas_generadas)}")
         except Exception as e:
             print(f"   ⚠️ Error generando etiquetas: {e}")
@@ -438,35 +498,70 @@ def preparar_datos_familia(
     else:
         print("   ⚠️ No se encontraron códigos válidos en los registros")
 
-    codigo_firma1 = str(r0.get("FIRMA", "")).strip()
-    
-    print(f"   🔍 Validando firma: {codigo_firma1} para norma {norma}")
-    
-    nombre_firma1, imagen_firma1, firma1_acreditada = validar_acreditacion_inspector(
-        codigo_firma1, 
-        norma, 
-        firmas_map
-    )
-    
-    firma_valida = False
+    # Buscar entre todos los registros de la familia un inspector (código FIRMA)
+    # que esté acreditado para la norma actual. Esto evita usar siempre el
+    # primer registro y que se requiera que todos los inspectores tengan las
+    # mismas acreditaciones.
+    codigo_firma1 = ""
+    nombre_firma1 = ""
+    imagen_firma1 = ""
+    firma1_acreditada = False
     razon_sin_firma = ""
-    
-    if not nombre_firma1:
-        # Código no encontrado
-        razon_sin_firma = f"Código de firma '{codigo_firma1}' no encontrado en Firmas.json"
-        print(f"   ⚠️ DICTAMEN SIN FIRMA: {razon_sin_firma}")
-        nombre_firma1 = ""
-        imagen_firma1 = ""
-    elif not firma1_acreditada:
-        # Inspector no acreditado para esta norma
-        razon_sin_firma = f"Inspector {nombre_firma1} no acreditado para {norma}"
-        print(f"   ⚠️ DICTAMEN SIN FIRMA: {razon_sin_firma}")
-        nombre_firma1 = ""
-        imagen_firma1 = ""
+
+    # Priorizar códigos explícitos bajo claves comunes en cada registro
+    posibles_claves = ('FIRMA', 'firma', 'INSPECTOR', 'Inspector', 'inspector')
+    for rec in registros:
+        for k in posibles_claves:
+            try:
+                val = rec.get(k)
+            except Exception:
+                val = None
+            if not val:
+                continue
+            cand = str(val).strip()
+            if not cand:
+                continue
+            # Intentar validar el candidato como código de firma
+            nom_tmp, img_tmp, ac_tmp = validar_acreditacion_inspector(cand, norma, firmas_map)
+            if nom_tmp and ac_tmp:
+                codigo_firma1 = cand
+                nombre_firma1 = nom_tmp
+                imagen_firma1 = img_tmp
+                firma1_acreditada = True
+                print(f"   ✅ Firma asignada (desde registros): {nombre_firma1} [{codigo_firma1}]")
+                break
+        if firma1_acreditada:
+            break
+
+    # Si no encontramos ningún inspector acreditado entre los registros,
+    # intentar validar el código del primer registro como fallback (comportamiento previo)
+    if not firma1_acreditada:
+        codigo_fallback = str(r0.get("FIRMA", "")).strip()
+        if codigo_fallback:
+            print(f"   🔍 No se encontró firma acreditada en la familia; validando fallback: {codigo_fallback} para norma {norma}")
+            nombre_firma1, imagen_firma1, firma1_acreditada = validar_acreditacion_inspector(
+                codigo_fallback,
+                norma,
+                firmas_map
+            )
+            codigo_firma1 = codigo_fallback
+
+        if not nombre_firma1:
+            razon_sin_firma = f"Código de firma '{codigo_firma1}' no encontrado en Firmas.json"
+            print(f"   ⚠️ DICTAMEN SIN FIRMA: {razon_sin_firma}")
+            nombre_firma1 = ""
+            imagen_firma1 = ""
+            firma1_acreditada = False
+        elif not firma1_acreditada:
+            razon_sin_firma = f"Inspector {nombre_firma1} no acreditado para {norma}"
+            print(f"   ⚠️ DICTAMEN SIN FIRMA: {razon_sin_firma}")
+            nombre_firma1 = ""
+            imagen_firma1 = ""
+        else:
+            # Firma válida desde fallback
+            print(f"   ✅ Firma asignada (fallback): {nombre_firma1} [{codigo_firma1}]")
     else:
-        # Firma válida
         firma_valida = True
-        print(f"   ✅ Firma asignada: {nombre_firma1}")
     
     nombre_firma2, imagen_firma2, aflores_acreditado = validar_acreditacion_inspector(
         "AFLORES", 

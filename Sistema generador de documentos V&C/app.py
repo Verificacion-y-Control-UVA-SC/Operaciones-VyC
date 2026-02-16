@@ -9,7 +9,6 @@ import customtkinter as ctk
 from tkinter import filedialog, messagebox, simpledialog
 from tkinter import ttk
 import tkinter as tk
-import tkinter as tk
 import tkinter.font as tkfont
 import threading
 import subprocess
@@ -18,24 +17,10 @@ import importlib.util
 from datetime import datetime
 import folio_manager
 from plantillaPDF import cargar_tabla_relacion
-import unicodedata
 import time
 import platform
-from datetime import datetime
-from tkinter import filedialog, messagebox, simpledialog
-from tkinter import ttk
-import tkinter as tk
-import threading
-import subprocess
-import importlib
-import importlib.util
-from datetime import datetime
-import folio_manager
-from plantillaPDF import cargar_tabla_relacion
 import unicodedata
-import time
-import platform
-from datetime import datetime
+from PyPDF2 import PdfReader
 
 # ---------- ESTILO VISUAL V&C ---------- #
 STYLE = {
@@ -71,37 +56,83 @@ DATA_DIR = os.getenv('IMAGENESVC_DATA_DIR')
 if DATA_DIR:
     DATA_DIR = os.path.abspath(DATA_DIR)
 else:
-
     if getattr(sys, 'frozen', False):
-        user_data = os.path.join(os.path.expanduser("~"), 'AppData', 'Local', 'Sistema_Generador_VC', 'data')
+        # Prefer a `data` folder next to the executable when running the
+        # bundled .exe. Fall back to AppData if the local folder cannot be
+        # created for permission reasons.
+        preferred_data = os.path.join(APP_DIR, 'data')
         try:
-            os.makedirs(user_data, exist_ok=True)
+            os.makedirs(preferred_data, exist_ok=True)
         except Exception:
-            user_data = os.path.join(APP_DIR, 'data')
+            preferred_data = os.path.join(os.path.expanduser("~"), 'AppData', 'Local', 'Sistema_Generador_VC', 'data')
+            try:
+                os.makedirs(preferred_data, exist_ok=True)
+            except Exception:
+                # Last-resort fallback
+                preferred_data = os.path.join(APP_DIR, 'data')
 
-        bundled_data = os.path.join(BASE_DIR, 'data')
+        def _bundle_candidates(subpath):
+            candidates = [
+                os.path.join(APP_DIR, subpath),
+                os.path.join(APP_DIR, '_internal', subpath),
+                os.path.join(BASE_DIR, subpath),
+                os.path.join(BASE_DIR, '_internal', subpath),
+            ]
+            return [p for p in candidates if os.path.exists(p)]
+
+        bundled_data = None
+        cands = _bundle_candidates('data')
+        if cands:
+            bundled_data = cands[0]
+
+        # Debug info into the chosen preferred_data
         try:
-            if os.path.exists(bundled_data) and (not os.listdir(user_data)):
-                import shutil
-                try:
-                    shutil.copytree(bundled_data, user_data, dirs_exist_ok=True)
-                except Exception:
-                    # intentar copia archivo por archivo si copytree falla
-                    for root, dirs, files in os.walk(bundled_data):
-                        rel = os.path.relpath(root, bundled_data)
-                        target_root = os.path.join(user_data, rel) if rel != '.' else user_data
-                        os.makedirs(target_root, exist_ok=True)
-                        for f in files:
-                            src = os.path.join(root, f)
-                            dst = os.path.join(target_root, f)
-                            try:
-                                shutil.copy2(src, dst)
-                            except Exception:
-                                pass
+            bdbg = os.path.join(preferred_data, 'startup_exe_debug.log')
+            with open(bdbg, 'a', encoding='utf-8') as _bd:
+                _bd.write(f"bundle_candidates={cands}\nchosen={bundled_data}\npreferred={preferred_data}\n")
         except Exception:
             pass
 
-        DATA_DIR = os.path.abspath(user_data)
+        try:
+            FORCE_REFRESH = os.environ.get('IMAGENESVC_FORCE_REFRESH') == '1'
+            if bundled_data and os.path.exists(bundled_data):
+                for root, dirs, files in os.walk(bundled_data):
+                    rel = os.path.relpath(root, bundled_data)
+                    target_root = os.path.join(preferred_data, rel) if rel != '.' else preferred_data
+                    os.makedirs(target_root, exist_ok=True)
+                    for f in files:
+                        src = os.path.join(root, f)
+                        dst = os.path.join(target_root, f)
+                        try:
+                            copy_it = False
+                            if FORCE_REFRESH:
+                                copy_it = True
+                            elif not os.path.exists(dst):
+                                copy_it = True
+                            else:
+                                try:
+                                    dst_size = os.path.getsize(dst)
+                                except Exception:
+                                    dst_size = None
+                                if dst_size == 0:
+                                    copy_it = True
+                                else:
+                                    try:
+                                        src_mtime = os.path.getmtime(src)
+                                        dst_mtime = os.path.getmtime(dst)
+                                        if src_mtime > dst_mtime + 1:
+                                            copy_it = True
+                                    except Exception:
+                                        pass
+
+                            if copy_it:
+                                shutil.copy2(src, dst)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+        DATA_DIR = os.path.abspath(preferred_data)
     else:
         DATA_DIR = os.path.join(APP_DIR, 'data')
 try:
@@ -109,11 +140,64 @@ try:
 except Exception:
     pass
 
+# DEBUG: volcar información de rutas y existencia de archivos clave al iniciar
+try:
+    dbg_files = [
+        'Clientes.json', 'tabla_de_relacion.json', 'Firmas.json',
+        'folio_counter.json', 'historial_visitas.json', 'pending_folios.json'
+    ]
+    dbg_path = None
+    try:
+        dbg_path = os.path.join(DATA_DIR, 'startup_exe_debug.log')
+    except Exception:
+        dbg_path = os.path.join(os.path.expanduser('~'), 'startup_exe_debug.log')
+
+    with open(dbg_path, 'a', encoding='utf-8') as dbg:
+        import time
+        dbg.write('\n===== STARTUP DEBUG: ' + time.strftime('%Y-%m-%d %H:%M:%S') + ' =====\n')
+        try:
+            dbg.write(f"frozen={getattr(sys,'frozen',False)}\n")
+            dbg.write(f"BASE_DIR={BASE_DIR}\n")
+            dbg.write(f"APP_DIR={APP_DIR}\n")
+            dbg.write(f"DATA_DIR={DATA_DIR}\n")
+            dbg.write(f"CWD={os.path.abspath(os.getcwd())}\n")
+            dbg.write(f"ENV.IMAGENESVC_DATA_DIR={os.environ.get('IMAGENESVC_DATA_DIR')}\n")
+            dbg.write(f"ENV.FOLIO_DATA_DIR={os.environ.get('FOLIO_DATA_DIR')}\n")
+        except Exception as e:
+            dbg.write(f"ERROR writing basic info: {e}\n")
+
+        for fn in dbg_files:
+            try:
+                p = os.path.join(DATA_DIR, fn)
+                exists = os.path.exists(p)
+                size = os.path.getsize(p) if exists and os.path.isfile(p) else None
+                dbg.write(f"{fn}: exists={exists} size={size} path={p}\n")
+            except Exception as e:
+                dbg.write(f"{fn}: error checking: {e}\n")
+
+        # list top-level data files
+        try:
+            for root, dirs, files in os.walk(DATA_DIR):
+                rel = os.path.relpath(root, DATA_DIR)
+                dbg.write(f"DIR: {rel}\n")
+                for f in files:
+                    try:
+                        fp = os.path.join(root, f)
+                        dbg.write(f"  - {f} ({os.path.getsize(fp)} bytes)\n")
+                    except Exception:
+                        dbg.write(f"  - {f} (size error)\n")
+        except Exception as e:
+            dbg.write(f"ERROR walking DATA_DIR: {e}\n")
+
+        dbg.write('===== END STARTUP DEBUG =====\n')
+except Exception:
+    pass
+
 
 class SistemaDictamenesVC(ctk.CTk):
     # --- PAGINACIÓN HISTORIAL ---
     HISTORIAL_PAGINA_ACTUAL = 1
-    HISTORIAL_REGS_POR_PAGINA = 1000
+    HISTORIAL_REGS_POR_PAGINA = 100
 
     def __init__(self):
         super().__init__()
@@ -171,16 +255,46 @@ class SistemaDictamenesVC(ctk.CTk):
         data_dir = DATA_DIR
         if getattr(sys, 'frozen', False):
             try:
-                # asegúrate de que exista data
+                # asegúrate de que exista data (sincronizar desde bundle cuando procede)
                 if not os.path.exists(data_dir):
-                    embedded_data = os.path.join(BASE_DIR, 'data')
-                    if os.path.exists(embedded_data):
-                        try:
-                            shutil.copytree(embedded_data, data_dir)
-                        except Exception:
-                            os.makedirs(data_dir, exist_ok=True)
-                    else:
-                        os.makedirs(data_dir, exist_ok=True)
+                    os.makedirs(data_dir, exist_ok=True)
+
+                FORCE_REFRESH = os.environ.get('IMAGENESVC_FORCE_REFRESH') == '1'
+                embedded_data = os.path.join(BASE_DIR, 'data')
+                if os.path.exists(embedded_data):
+                    for root, dirs, files in os.walk(embedded_data):
+                        rel = os.path.relpath(root, embedded_data)
+                        target_root = os.path.join(data_dir, rel) if rel != '.' else data_dir
+                        os.makedirs(target_root, exist_ok=True)
+                        for f in files:
+                            sfile = os.path.join(root, f)
+                            dfile = os.path.join(target_root, f)
+                            try:
+                                copy_it = False
+                                if FORCE_REFRESH:
+                                    copy_it = True
+                                elif not os.path.exists(dfile):
+                                    copy_it = True
+                                else:
+                                    try:
+                                        dsize = os.path.getsize(dfile)
+                                    except Exception:
+                                        dsize = None
+                                    if dsize == 0:
+                                        copy_it = True
+                                    else:
+                                        try:
+                                            sm = os.path.getmtime(sfile)
+                                            dm = os.path.getmtime(dfile)
+                                            if sm > dm + 1:
+                                                copy_it = True
+                                        except Exception:
+                                            pass
+
+                                if copy_it:
+                                    shutil.copy2(sfile, dfile)
+                            except Exception:
+                                pass
 
                 # Asegurar que otros recursos estén disponibles junto al exe.
                 resource_folders = [
@@ -191,15 +305,28 @@ class SistemaDictamenesVC(ctk.CTk):
                     'img'
                 ]
                 for rf in resource_folders:
-                    src = os.path.join(BASE_DIR, rf)
+                    # buscar candidatos en BASE_DIR y en BASE_DIR/_internal
+                    candidates = [os.path.join(BASE_DIR, rf), os.path.join(BASE_DIR, '_internal', rf)]
+                    src = None
+                    for c in candidates:
+                        if os.path.exists(c):
+                            src = c
+                            break
+                    if not src:
+                        continue
                     dst = os.path.join(APP_DIR, rf)
-                    if not os.path.exists(dst) and os.path.exists(src):
-                        try:
-                            shutil.copytree(src, dst)
-                        except Exception:
-                            # fallback: create directory
+                    os.makedirs(dst, exist_ok=True)
+                    # copiar solo archivos/carpetas faltantes
+                    for root, dirs, files in os.walk(src):
+                        rel = os.path.relpath(root, src)
+                        target_root = os.path.join(dst, rel) if rel != '.' else dst
+                        os.makedirs(target_root, exist_ok=True)
+                        for f in files:
+                            sfile = os.path.join(root, f)
+                            dfile = os.path.join(target_root, f)
                             try:
-                                os.makedirs(dst, exist_ok=True)
+                                if (not os.path.exists(dfile)) or (os.path.exists(dfile) and os.path.getsize(dfile) == 0):
+                                    shutil.copy2(sfile, dfile)
                             except Exception:
                                 pass
             except Exception:
@@ -354,7 +481,13 @@ class SistemaDictamenesVC(ctk.CTk):
                 base_path = sys._MEIPASS
             except Exception:
                 base_path = os.path.abspath(".")
-            return os.path.join(base_path, relative_path)
+            # comprobar además la posible carpeta _internal donde PyInstaller coloca datas
+            candidates = [os.path.join(base_path, relative_path), os.path.join(base_path, '_internal', relative_path)]
+            for p in candidates:
+                if os.path.exists(p):
+                    return p
+            # por defecto, devolver primer candidato
+            return candidates[0]
 
         try:
             icon_path = resource_path("img/icono.ico")
@@ -472,8 +605,8 @@ class SistemaDictamenesVC(ctk.CTk):
         #         text="💾 Backup",
         #         command=self.hist_hacer_backup,
         #         height=34, width=110, corner_radius=8,
-        #         fg_color=STYLE["primario"], text_color=STYLE["secundario"], hover_color="#D4BF22"
-        #     )
+        #   except Exception:
+        #      return {}
         # except Exception:
         #     self.btn_backup = None
 
@@ -1624,7 +1757,7 @@ class SistemaDictamenesVC(ctk.CTk):
         # Campos mínimos sugeridos
         self.cliente_campos = {}
         campos = [
-            ("RFC", 25), ("CLIENTE", 35), ("No. CONTRATO", 30), ("ACTIVIDAD", 20),
+            ("RFC", 25), ("CLIENTE", 35), ("No. CONTRATO", 30), ("FECHA DE CONTRATO", 18), ("ACTIVIDAD", 20),
             ("CURP", 18)
         ]
 
@@ -2054,8 +2187,7 @@ class SistemaDictamenesVC(ctk.CTk):
         # Normas seleccionadas desde checkboxes
         try:
             normas_sel = [n for n, var in (self.inspector_normas_vars or {}).items() if getattr(var, 'get', lambda: False)()]
-            if normas_sel:
-                nuevo['Normas acreditadas'] = normas_sel
+            nuevo['Normas acreditadas'] = normas_sel
         except Exception:
             pass
 
@@ -2076,7 +2208,11 @@ class SistemaDictamenesVC(ctk.CTk):
                 for i, rec in enumerate(datos):
                     try:
                         if str(rec.get('FIRMA','')) == str(edit_key):
-                            datos[i] = nuevo
+                            # Merge existing record with updated fields from form
+                            # to preserve keys like 'IMAGEN' when not provided in form.
+                            merged = rec.copy() if isinstance(rec, dict) else {}
+                            merged.update(nuevo)
+                            datos[i] = merged
                             actualizado = True
                             break
                     except Exception:
@@ -2186,35 +2322,66 @@ class SistemaDictamenesVC(ctk.CTk):
             messagebox.showinfo('Exportar', 'No hay datos de inspectores para exportar.')
             return
 
-        rows = []
+        # Procesar normas para que cada norma ocupe su propia columna (NORMA 1, NORMA 2, ...)
+        processed = []
+        # usar regex para separar cadenas de normas cuando sea necesario
+        import re
+        max_normas = 0
         for rec in datos:
             try:
-                nombre = rec.get('NOMBRE DE INSPECTOR') or rec.get('NOMBRE') or ''
-                correo = rec.get('CORREO') or rec.get('EMAIL') or ''
-                firma = rec.get('FIRMA','')
-                puesto = rec.get('Puesto') or rec.get('PUESTO') or ''
-                vig = rec.get('VIGENCIA','')
                 normas = rec.get('Normas acreditadas') or rec.get('Normas') or rec.get('NORMAS') or []
-                if isinstance(normas, (list, tuple)):
-                    normas_txt = '; '.join(str(n) for n in normas)
+                if not isinstance(normas, (list, tuple)):
+                    # intentar deserializar separadores comunes
+                    if isinstance(normas, str):
+                        normas_list = [s.strip() for s in re.split(r';|,|\n', normas) if s.strip()]
+                    else:
+                        normas_list = [str(normas)]
                 else:
-                    normas_txt = str(normas)
-                rows.append({
-                    'NOMBRE': nombre,
-                    'CORREO': correo,
-                    'FIRMA': firma,
-                    'PUESTO': puesto,
-                    'VIGENCIA': vig,
-                    'NORMAS': normas_txt
-                })
+                    normas_list = [str(n).strip() for n in normas]
+                    # ordenar natural (por números dentro de la cadena) de menor a mayor
+                    def _natural_key(x):
+                        parts = re.split(r'(\d+)', x)
+                        return [int(p) if p.isdigit() else p.lower() for p in parts]
+                    try:
+                        normas_list = sorted(normas_list, key=_natural_key)
+                    except Exception:
+                        normas_list = sorted(normas_list)
+                max_normas = max(max_normas, len(normas_list))
+                processed.append((rec, normas_list))
             except Exception:
-                continue
+                processed.append((rec, []))
 
         try:
             save_path = filedialog.asksaveasfilename(defaultextension='.xlsx', filetypes=[('Excel','*.xlsx')], title='Guardar catálogo de inspectores')
             if not save_path:
                 return
-            df = pd.DataFrame(rows, columns=['NOMBRE','CORREO','FIRMA','PUESTO','VIGENCIA','NORMAS'])
+
+            # Construir filas con columnas de normas separadas
+            rows = []
+            for rec, normas_list in processed:
+                nombre = rec.get('NOMBRE DE INSPECTOR') or rec.get('NOMBRE') or ''
+                correo = rec.get('CORREO') or rec.get('EMAIL') or ''
+                firma = rec.get('FIRMA','')
+                puesto = rec.get('Puesto') or rec.get('PUESTO') or ''
+                vig = rec.get('VIGENCIA','')
+                row = {
+                    'NOMBRE': nombre,
+                    'CORREO': correo,
+                    'FIRMA': firma,
+                    'PUESTO': puesto,
+                    'VIGENCIA': vig
+                }
+                # Añadir columnas NORMA 1..N
+                for i in range(max_normas):
+                    key = f'NORMA {i+1}'
+                    row[key] = normas_list[i] if i < len(normas_list) else ''
+                rows.append(row)
+
+            # Columnas base + dinamicas de normas
+            base_cols = ['NOMBRE','CORREO','FIRMA','PUESTO','VIGENCIA']
+            norma_cols = [f'NORMA {i+1}' for i in range(max_normas)]
+            df = pd.DataFrame(rows, columns=base_cols + norma_cols)
+
             try:
                 with pd.ExcelWriter(save_path, engine='openpyxl') as writer:
                     df.to_excel(writer, index=False, sheet_name='Inspectores')
@@ -2394,52 +2561,42 @@ class SistemaDictamenesVC(ctk.CTk):
             return
         if not messagebox.askyesno('Confirmar', f'¿Eliminar el inspector {vals[0]}?'):
             return
+
         ruta = os.path.join(DATA_DIR, 'Firmas.json')
         try:
             with open(ruta, 'r', encoding='utf-8') as f:
                 datos = json.load(f) or []
         except Exception:
             datos = []
+
         nuevo_arr = []
         eliminado = False
-        for rec in datos:
+        for rec in (datos or []):
             try:
-                if str(rec.get('FIRMA','')) == str(key_firma):
+                if str(rec.get('FIRMA', '')).strip().upper() != str(key_firma).strip().upper():
+                    nuevo_arr.append(rec)
+                else:
                     eliminado = True
-                    continue
             except Exception:
-                pass
-            nuevo_arr.append(rec)
+                # si falla la comparación, mantener el registro para no perder datos
+                nuevo_arr.append(rec)
+
         try:
             with open(ruta, 'w', encoding='utf-8') as f:
-                json.dump(nuevo_arr, f, ensure_ascii=False, indent=2)
+                json.dump(nuevo_arr, f, indent=2, ensure_ascii=False)
         except Exception as e:
-            messagebox.showerror('Error', f'No se pudo eliminar el inspector: {e}')
+            messagebox.showerror('Error', f'No se pudo actualizar {ruta}: {e}')
             return
+
         if eliminado:
-            messagebox.showinfo('Eliminado', 'Inspector eliminado correctamente.')
+            messagebox.showinfo('Eliminado', 'Inspector eliminado correctamente')
         else:
-            messagebox.showinfo('No encontrado', 'No se encontró el inspector a eliminar.')
+            messagebox.showwarning('No encontrado', 'No se encontró el inspector en el archivo')
+
         try:
             self._refrescar_tabla_inspectores()
         except Exception:
             pass
-
-
-
-
-
-
-
-
-
-
-    def _formatear_hora_12h(self, hora_str):
-        """Convierte hora de formato 24h a formato 12h con AM/PM de forma consistente"""
-        if not hora_str or hora_str.strip() == "":
-            return ""
-        
-        try:
             # Limpiar y estandarizar la cadena
             hora_str = str(hora_str).strip()
             
@@ -2555,8 +2712,20 @@ class SistemaDictamenesVC(ctk.CTk):
         try:
             with open(archivo_encontrado, 'r', encoding='utf-8') as f:
                 datos = json.load(f)
+            try:
+                dbg = os.path.join(DATA_DIR, 'startup_exe_debug.log')
+                with open(dbg, 'a', encoding='utf-8') as _d:
+                    _d.write(f"cargar_clientes: opened {archivo_encontrado} size={os.path.getsize(archivo_encontrado)}\n")
+            except Exception:
+                pass
         except Exception:
             datos = []
+            try:
+                dbg = os.path.join(DATA_DIR, 'startup_exe_debug.log')
+                with open(dbg, 'a', encoding='utf-8') as _d:
+                    _d.write(f"cargar_clientes: FAILED to open {archivo_encontrado}\n")
+            except Exception:
+                pass
 
         # Guardar lista original en memoria
         self.clientes_data = datos if isinstance(datos, list) else []
@@ -2618,8 +2787,17 @@ class SistemaDictamenesVC(ctk.CTk):
 
             nuevo['RFC'] = _get_field('RFC')
             nuevo['CLIENTE'] = _get_field('CLIENTE')
-            # Mapear 'No. CONTRATO' -> 'NÚMERO_DE_CONTRATO'
-            nuevo['NÚMERO_DE_CONTRATO'] = _get_field('NÚMERO_DE_CONTRATO')
+            # Mapear desde varios posibles labels en el formulario hacia 'NÚMERO_DE_CONTRATO'
+            nro_candidates = ['NÚMERO_DE_CONTRATO', 'NÚMERO DE CONTRATO', 'No. DE CONTRATO', 'No. CONTRATO', 'NUMERO_DE_CONTRATO', 'NUMERO DE CONTRATO']
+            nro_val = ''
+            for c in nro_candidates:
+                val = _get_field(c)
+                if val:
+                    nro_val = val
+                    break
+            nuevo['NÚMERO_DE_CONTRATO'] = nro_val
+            # Fecha de firma del contrato: mapear desde el campo agregado 'FECHA DE CONTRATO'
+            nuevo['FECHA_DE_CONTRATO'] = _get_field('FECHA DE CONTRATO') or _get_field('FECHA_DE_CONTRATO')
             nuevo['ACTIVIDAD'] = _get_field('ACTIVIDAD')
             nuevo['CURP'] = _get_field('CURP')
         except Exception:
@@ -3648,7 +3826,7 @@ class SistemaDictamenesVC(ctk.CTk):
 
             registros = df.to_dict(orient="records")
 
-            data_dir = os.path.join(APP_DIR, "data")
+            data_dir = DATA_DIR
             os.makedirs(data_dir, exist_ok=True)
 
             output_json = os.path.join(data_dir, "base_etiquetado.json")
@@ -4325,7 +4503,7 @@ class SistemaDictamenesVC(ctk.CTk):
                 print(f"⚠️ Error asignando folios automáticos secuenciales: {e}")
 
 
-            data_folder = os.path.join(APP_DIR, "data")
+            data_folder = DATA_DIR
             os.makedirs(data_folder, exist_ok=True)
 
             self.json_filename = "tabla_de_relacion.json"
@@ -4915,8 +5093,9 @@ class SistemaDictamenesVC(ctk.CTk):
         self.etiqueta_progreso.configure(text="")
 
         try:
-            data_dir = os.path.join(APP_DIR, "data")
-            
+            data_dir = DATA_DIR
+            os.makedirs(data_dir, exist_ok=True)
+
             archivos_a_eliminar = [
                 "base_etiquetado.json",
                 "tabla_de_relacion.json"
@@ -7067,6 +7246,15 @@ class SistemaDictamenesVC(ctk.CTk):
         except Exception:
             pass
 
+        # Configurar tags de colores para estatus (cancelada=rojo, pendiente=amarillo, completado=verde)
+        try:
+            # usar colores suaves para legibilidad
+            self.hist_tree.tag_configure('cancelado', background='#FFC7CE')
+            self.hist_tree.tag_configure('pendiente', background='#FFF2CC')
+            self.hist_tree.tag_configure('completado', background='#C6EFCE')
+        except Exception:
+            pass
+
         # Insertar registros de la página actual
         for idx in range(inicio, fin):
             registro = regs[idx]
@@ -7134,7 +7322,20 @@ class SistemaDictamenesVC(ctk.CTk):
             # Insertar en tree
             iid = f"h_{idx}"
             try:
-                self.hist_tree.insert('', 'end', iid=iid, values=datos)
+                # determinar tag según estatus
+                est_raw = str(registro.get('estatus', '') or '').strip().lower()
+                tag = None
+                if 'cancel' in est_raw:
+                    tag = 'cancelado'
+                elif 'pend' in est_raw:
+                    tag = 'pendiente'
+                elif 'complet' in est_raw or 'finaliz' in est_raw:
+                    tag = 'completado'
+
+                if tag:
+                    self.hist_tree.insert('', 'end', iid=iid, values=datos, tags=(tag,))
+                else:
+                    self.hist_tree.insert('', 'end', iid=iid, values=datos)
                 self._hist_map[iid] = registro
             except Exception:
                 pass
@@ -7318,7 +7519,7 @@ class SistemaDictamenesVC(ctk.CTk):
         # Crear ventana modal
         modal = ctk.CTkToplevel(self)
         modal.title("Descargar Documentos")
-        modal.geometry("750x400")
+        modal.geometry("750x600")
         modal.transient(self)
         modal.grab_set()
         
@@ -7548,6 +7749,135 @@ class SistemaDictamenesVC(ctk.CTk):
                 # Importar dinámicamente y generar según tipo
                 try:
                     import importlib.util
+                    # --- Generador especial: Reporte Decathlon ---
+                    if tipo == 'decathlon':
+                        # Generar y guardar automáticamente en data/Reportes_Decathlon
+                        folio = registro.get('folio_visita', '')
+                        if not folio:
+                            messagebox.showwarning('Error', 'No se encontró el folio de la visita para generar el reporte Decathlon.')
+                            return
+
+                        # Buscar backup de tabla_relacion correspondiente al folio
+                        tabla_relacion_data = None
+                        try:
+                            if os.path.exists(backups_dir):
+                                archivos = [os.path.join(backups_dir, f) for f in os.listdir(backups_dir) if f.lower().endswith('.json')]
+                                # Prefer files that contain the folio identifier (CP...)
+                                matched = [a for a in archivos if folio in os.path.basename(a)]
+                                src = None
+                                if matched:
+                                    src = max(matched, key=os.path.getmtime)
+                                elif archivos:
+                                    src = max(archivos, key=os.path.getmtime)
+                                if src:
+                                    with open(src, 'r', encoding='utf-8') as tf:
+                                        try:
+                                            tabla_relacion_data = json.load(tf)
+                                        except Exception:
+                                            tabla_relacion_data = None
+                        except Exception:
+                            tabla_relacion_data = None
+
+                        # Ensure reports dir exists
+                        reports_dir = os.path.join(data_dir_local, 'Reportes_Decathlon')
+                        try:
+                            os.makedirs(reports_dir, exist_ok=True)
+                        except Exception:
+                            pass
+
+                        output_name = f"Reporte_Decathlon_{folio}.pdf"
+                        output_path = os.path.join(reports_dir, output_name)
+
+                        # Cargar módulo Reporte_Decathlon
+                        rep_file = os.path.join(BASE_DIR, 'Documentos Inspeccion', 'Reporte_Decathlon.py')
+                        if not os.path.exists(rep_file):
+                            messagebox.showerror('Error', f'No se encontró el generador de reportes: {rep_file}')
+                            return
+                        spec_rep = importlib.util.spec_from_file_location('Reporte_Decathlon', rep_file)
+                        if spec_rep is None or getattr(spec_rep, 'loader', None) is None:
+                            messagebox.showerror('Error', f'No se pudo cargar el módulo Reporte_Decathlon (spec inválido): {rep_file}')
+                            return
+                        rep_mod = importlib.util.module_from_spec(spec_rep)
+                        import sys as _sys
+                        _sys.modules['Reporte_Decathlon'] = rep_mod
+                        spec_rep.loader.exec_module(rep_mod)
+
+                        # Llamar al generador
+                        try:
+                            # Si el usuario seleccionó una ruta en el diálogo, usaremos esa ruta como salida final
+                            ruta_usuario = save_path if save_path else output_path
+
+                            rep_mod.generar_reporte_decathlon(
+                                nombre_cliente=registro.get('cliente',''),
+                                folio_inspeccion=registro.get('folio_visita',''),
+                                fecha_inspeccion=registro.get('fecha_termino') or registro.get('fecha_inicio') or datetime.now().strftime('%Y-%m-%d'),
+                                tabla_relacion=tabla_relacion_data,
+                                lista_equipos=None,
+                                observaciones_generales=registro.get('observaciones',''),
+                                ruta_guardado=ruta_usuario,
+                                folio_visita=registro.get('folio_visita',''),
+                                destinatario=registro.get('destinatario') or 'Diana Cumpean'
+                            )
+                            # No crear copia PDF en carpeta local (solo guardamos el JSON con metadatos)
+                        except Exception as e:
+                            messagebox.showerror('Error', f'Error generando Reporte Decathlon:\n{e}')
+                            return
+
+                        # Guardar JSON meta en carpeta local de Reportes_Decathlon
+                        try:
+                            # Construir JSON reducido con solo los datos impresos
+                            fecha_verif = None
+                            printed_rows = []
+                            if isinstance(tabla_relacion_data, list):
+                                seen = {}
+                                order = []
+                                for item in tabla_relacion_data:
+                                    if fecha_verif is None:
+                                        fecha_verif = item.get('FECHA DE VERIFICACION') or item.get('Fecha de Verificacion') or item.get('FECHA_VERIFICACION')
+                                    sol = item.get('SOLICITUD') or item.get('Solicitud') or item.get('solicitud') or ''
+                                    fol = item.get('FOLIO') or item.get('folio') or item.get('Folio') or ''
+                                    ped = item.get('PEDIMENTO') or item.get('pedimento') or item.get('Referencia') or item.get('referencia') or ''
+                                    key = str(fol)
+                                    if key not in seen:
+                                        seen[key] = {'SOLICITUD': sol, 'FOLIO': fol, 'PEDIMENTO': ped}
+                                        order.append(key)
+                                for k in order:
+                                    printed_rows.append(seen[k])
+
+                            meta = {
+                                'generado_en': datetime.now().isoformat(),
+                                'archivo_usuario': ruta_usuario,
+                                'folio_visita': folio,
+                                'cliente': registro.get('cliente',''),
+                                'destinatario': registro.get('destinatario') or 'Diana Cumpean',
+                                'fecha_verificacion': fecha_verif,
+                                'observaciones': registro.get('observaciones',''),
+                                'dictamenes_impresos': printed_rows
+                            }
+                            json_path = os.path.join(reports_dir, f"Reporte_Decathlon_{folio}.json")
+                            with open(json_path, 'w', encoding='utf-8') as jf:
+                                json.dump(meta, jf, ensure_ascii=False, indent=2)
+                        except Exception:
+                            json_path = None
+
+                        # Persistir ruta en historial (usar ruta de usuario si existe)
+                        try:
+                            for v in self.historial.get('visitas', []):
+                                if v.get('folio_visita') == folio:
+                                    v['ruta_reporte_decathlon'] = ruta_usuario
+                                    if json_path:
+                                        v['ruta_reporte_decathlon_meta'] = json_path
+                                    break
+                            self._guardar_historial()
+                        except Exception:
+                            pass
+
+                        # Informar al usuario rutas generadas
+                        info_msg = f'Reporte guardado en:\n{ruta_usuario}'
+                        if json_path:
+                            info_msg += f"\nCopia y metadatos locales: {json_path}"
+                        messagebox.showinfo('Reporte Decathlon generado', info_msg)
+                        return
                     if tipo == 'formato':
                         formato_file = os.path.join(BASE_DIR, 'Documentos Inspeccion', 'Formato_supervision.py')
                         if not os.path.exists(formato_file):
@@ -7865,6 +8195,25 @@ class SistemaDictamenesVC(ctk.CTk):
         # Frame para botón cerrar
         footer_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
         footer_frame.pack(fill="x", pady=(20, 0))
+
+        # --- Tile especial: Reporte Decathlon (solo para cliente Decathlon) ---
+        try:
+            if registro.get('cliente','').strip().upper() == 'ARTICULOS DEPORTIVOS DECATHLON SA DE CV'.upper():
+                # Colocar en una fila nueva dentro de documentos_frame para que sea visible debajo de los 3 tiles
+                try:
+                    dec_frame = ctk.CTkFrame(documentos_frame, fg_color=STYLE["surface"], border_width=1, border_color=STYLE["borde"], corner_radius=10)
+                    # Grid en fila 1 y ocupar las 3 columnas
+                    dec_frame.grid(row=1, column=0, columnspan=3, padx=10, pady=(12,0), sticky='nsew')
+                    # Contenido centrado
+                    ctk.CTkLabel(dec_frame, text="📄", font=("Inter", 36), text_color=STYLE["primario"]).pack(pady=(8,4))
+                    ctk.CTkLabel(dec_frame, text="REPORTE DECATHLON", font=("Inter", 14, "bold"), text_color=STYLE["texto_oscuro"]).pack()
+                    ctk.CTkLabel(dec_frame, text="Reporte específico para Decathlon", font=("Inter", 10), text_color=STYLE["texto_oscuro"], wraplength=520, justify='center').pack(pady=(6,8), padx=10)
+                    btn_dec = ctk.CTkButton(dec_frame, text="Descargar", command=lambda: descargar_documento('decathlon', 'Reporte Decathlon'), font=("Inter",12,"bold"), fg_color=STYLE['secundario'], hover_color="#1a1a1a", text_color=STYLE['texto_claro'], height=36, corner_radius=6)
+                    btn_dec.pack(pady=(0,12), padx=120)
+                except Exception:
+                    pass
+        except Exception:
+            pass
         
     def guardar_folios_visita(self, folio_visita, datos_tabla, persist_counter=True):
         """Guarda los folios de una visita en un archivo JSON con formato 6 dígitos.
@@ -9003,7 +9352,7 @@ class SistemaDictamenesVC(ctk.CTk):
     def _cargar_config_exportacion(self):
         """Carga o crea la configuración persistente para las exportaciones Excel."""
         try:
-            data_folder = os.path.join(APP_DIR, "data")
+            data_folder = DATA_DIR
             os.makedirs(data_folder, exist_ok=True)
             cfg_path = os.path.join(data_folder, 'excel_export_config.json')
             if not os.path.exists(cfg_path):
@@ -9045,7 +9394,8 @@ class SistemaDictamenesVC(ctk.CTk):
 
     def _guardar_config_exportacion(self):
         try:
-            data_folder = os.path.join(APP_DIR, "data")
+            data_folder = DATA_DIR
+            os.makedirs(data_folder, exist_ok=True)
             cfg_path = os.path.join(data_folder, 'excel_export_config.json')
             with open(cfg_path, 'w', encoding='utf-8') as f:
                 json.dump(self.excel_export_config, f, ensure_ascii=False, indent=2)
@@ -9055,7 +9405,8 @@ class SistemaDictamenesVC(ctk.CTk):
     def _generar_datos_exportable(self):
         """Genera y persiste un JSON consolidado que será la fuente para las exportaciones EMA y anual."""
         try:
-            data_folder = os.path.join(APP_DIR, "data")
+            data_folder = DATA_DIR
+            os.makedirs(data_folder, exist_ok=True)
             tabla_path = self.excel_export_config.get('tabla_de_relacion') or os.path.join(data_folder, 'tabla_de_relacion.json')
             clientes_path = self.excel_export_config.get('clientes') or os.path.join(data_folder, 'Clientes.json')
             export_cache = self.excel_export_config.get('export_cache') or os.path.join(data_folder, 'excel_export_data.json')
@@ -9538,7 +9889,7 @@ class SistemaDictamenesVC(ctk.CTk):
 
             # 3) Revisar tabla_relacion_backups
             try:
-                tabla_relacion_backup_dir = os.path.join(APP_DIR, 'data', 'tabla_relacion_backups')
+                tabla_relacion_backup_dir = os.path.join(DATA_DIR, 'tabla_relacion_backups')
                 if os.path.exists(tabla_relacion_backup_dir):
                     for archivo in os.listdir(tabla_relacion_backup_dir):
                         if folio in archivo:
@@ -9570,7 +9921,7 @@ class SistemaDictamenesVC(ctk.CTk):
             # 4) Si aún no hay solicitudes, intentar leer tabla_de_relacion.json para filas asociadas al folio
             try:
                 if not solicitudes_a_eliminar:
-                    tabla_relacion_path = os.path.join(APP_DIR, 'data', 'tabla_de_relacion.json')
+                    tabla_relacion_path = os.path.join(DATA_DIR, 'tabla_de_relacion.json')
                     if os.path.exists(tabla_relacion_path):
                         try:
                             with open(tabla_relacion_path, 'r', encoding='utf-8') as tf:
@@ -9668,7 +10019,7 @@ class SistemaDictamenesVC(ctk.CTk):
 
             # 6) Eliminar dictámenes en data/Dictamenes que coincidan
             try:
-                dicts_dir = os.path.join(APP_DIR, 'data', 'Dictamenes')
+                dicts_dir = os.path.join(DATA_DIR, 'Dictamenes')
                 if os.path.exists(dicts_dir) and (folios_a_eliminar or solicitudes_a_eliminar):
                     import re
                     for fn in os.listdir(dicts_dir):
@@ -9748,7 +10099,7 @@ class SistemaDictamenesVC(ctk.CTk):
 
             # 7) Eliminar constancias en data/Constancias que coincidan
             try:
-                const_dir = os.path.join(APP_DIR, 'data', 'Constancias')
+                const_dir = os.path.join(DATA_DIR, 'Constancias')
                 if os.path.exists(const_dir) and (folios_a_eliminar or solicitudes_a_eliminar or folio):
                     for fn in os.listdir(const_dir):
                         if not fn.lower().endswith('.json'):
@@ -10180,7 +10531,7 @@ class SistemaDictamenesVC(ctk.CTk):
                                                 continue
                                 except Exception:
                                     continue
-                    tabla_relacion_path = os.path.join(APP_DIR, 'data', 'tabla_de_relacion.json')
+                    tabla_relacion_path = os.path.join(DATA_DIR, 'tabla_de_relacion.json')
                     if os.path.exists(tabla_relacion_path):
                         try:
                             with open(tabla_relacion_path, 'r', encoding='utf-8') as tf:
@@ -10376,7 +10727,7 @@ class SistemaDictamenesVC(ctk.CTk):
                         need_addr = not payload.get('direccion') or not payload.get('calle_numero')
                         cliente_nombre = payload.get('cliente') or ''
                         if need_addr and cliente_nombre:
-                            clientes_path = os.path.join(APP_DIR, 'data', 'Clientes.json')
+                            clientes_path = os.path.join(DATA_DIR, 'Clientes.json')
                             if os.path.exists(clientes_path):
                                 try:
                                     with open(clientes_path, 'r', encoding='utf-8') as cf:
@@ -10640,7 +10991,7 @@ class SistemaDictamenesVC(ctk.CTk):
                         need_addr = not actualizado.get('direccion') or not actualizado.get('calle_numero')
                         cliente_nombre = actualizado.get('cliente') or ''
                         if need_addr and cliente_nombre:
-                            clientes_path = os.path.join(APP_DIR, 'data', 'Clientes.json')
+                            clientes_path = os.path.join(DATA_DIR, 'Clientes.json')
                             if os.path.exists(clientes_path):
                                 try:
                                     with open(clientes_path, 'r', encoding='utf-8') as cf:
@@ -10872,9 +11223,9 @@ class SistemaDictamenesVC(ctk.CTk):
                 self.guardar_folios_visita(folio_visita, datos_tabla, persist_counter=persist_flag)
                 # Crear respaldo persistente de la tabla_de_relacion para visitas generadas
                 try:
-                    tabla_relacion_path = os.path.join(APP_DIR, 'data', 'tabla_de_relacion.json')
+                    tabla_relacion_path = os.path.join(DATA_DIR, 'tabla_de_relacion.json')
                     if os.path.exists(tabla_relacion_path):
-                        backup_dir = os.path.join(APP_DIR, 'data', 'tabla_relacion_backups')
+                        backup_dir = os.path.join(DATA_DIR, 'tabla_relacion_backups')
                         os.makedirs(backup_dir, exist_ok=True)
                         ts = datetime.now().strftime('%Y%m%d%H%M%S')
                         # Marcar como PERSIST para que no sea eliminado por limpiar
@@ -10981,6 +11332,8 @@ class SistemaDictamenesVC(ctk.CTk):
                 
                 # Prepare mapping dict even if file missing
                 firmas_mapeadas = {}
+                # collector for suggestions for unrecognized firmas
+                firma_sugerencias = {}
                 if os.path.exists(firmas_path):
                     with open(firmas_path, 'r', encoding='utf-8') as f:
                         firmas_data = json.load(f)
@@ -11002,18 +11355,53 @@ class SistemaDictamenesVC(ctk.CTk):
                         # Verificar que no sea NaN o vacío
                         if firma is not None and str(firma).strip() != "" and str(firma).lower() != "nan":
                             firma_str = str(firma).strip()
-                            firmas_originales.add(firma_str)
-
-                            # Normalizar para búsqueda
-                            buscar_clave = firma_str.upper()
-                            if buscar_clave in firmas_mapeadas:
-                                supervisores_encontrados.add(firmas_mapeadas[buscar_clave])
-                            else:
-                                # Si no encontramos mapeo, agregar la firma original
-                                supervisores_encontrados.add(firma_str)
+                            # Permitir múltiples firmas en la misma celda separadas por , ; / |
+                            import re, difflib
+                            parts = [p.strip() for p in re.split(r"[;,/|]+", firma_str) if p.strip()]
+                            for part in parts:
+                                firmas_originales.add(part)
+                                # Normalizar para búsqueda
+                                buscar_clave = part.upper()
+                                if buscar_clave in firmas_mapeadas:
+                                    supervisores_encontrados.add(firmas_mapeadas[buscar_clave])
+                                else:
+                                    # intentar búsqueda por similitud en claves conocidas
+                                    posibles = difflib.get_close_matches(buscar_clave, list(firmas_mapeadas.keys()), n=3, cutoff=0.6)
+                                    if posibles:
+                                        # sugerir la primera coincidencia (sin cambiar mapeo)
+                                        sugerencias = [firmas_mapeadas[p] for p in posibles if p in firmas_mapeadas]
+                                        # anotar como no reconocida pero con sugerencia
+                                        supervisores_encontrados.add(part)
+                                        # guardar sugerencia en un dict auxiliar
+                                        try:
+                                            if 'firma_sugerencias' not in locals():
+                                                firma_sugerencias = {}
+                                            firma_sugerencias[part] = sugerencias
+                                        except Exception:
+                                            pass
+                                    else:
+                                        # ninguna sugerencia, marcar como no reconocida
+                                        supervisores_encontrados.add(part)
             
             # Crear cadena de supervisores (ordenar alfabéticamente)
             supervisores_str = ", ".join(sorted(supervisores_encontrados)) if supervisores_encontrados else ""
+
+            # Construir advertencias para firmas no reconocidas (si las hay)
+            firma_warnings = ""
+            try:
+                # firmas_originales contiene las entradas tal cual del archivo
+                desconocidas = [s for s in sorted(firmas_originales) if s and s.upper() not in firmas_mapeadas]
+                if desconocidas:
+                    parts = []
+                    for d in desconocidas:
+                        sug = firma_sugerencias.get(d)
+                        if sug:
+                            parts.append(f"{d} (sugerencia: {', '.join(sug)})")
+                        else:
+                            parts.append(f"{d}")
+                    firma_warnings = "Firmas no reconocidas: " + "; ".join(parts)
+            except Exception:
+                firma_warnings = ""
             
             # Determinar qué supervisor mostrar en el campo principal
             # Prioridad: 1. Supervisores de la tabla, 2. Supervisor del formulario
@@ -11045,6 +11433,9 @@ class SistemaDictamenesVC(ctk.CTk):
                 "supervisores_tabla": supervisores_str,  # Todos los supervisores de la tabla
                 "supervisor_formulario": supervisor  # Supervisor del formulario (por si se necesita)
             }
+            # Añadir advertencias de firmas no reconocidas al payload si existen
+            if firma_warnings:
+                payload['firma_warnings'] = firma_warnings
 
             # Guardar visita automática
             self.hist_create_visita(payload, es_automatica=True)
@@ -11079,8 +11470,9 @@ class SistemaDictamenesVC(ctk.CTk):
         self.etiqueta_progreso.configure(text="")
 
         try:
-            data_dir = os.path.join(APP_DIR, "data")
-            
+            data_dir = DATA_DIR
+            os.makedirs(data_dir, exist_ok=True)
+
             # Archivos a eliminar (pero NO los de folios_visitas)
             archivos_a_eliminar = [
                 "base_etiquetado.json",
@@ -11146,6 +11538,19 @@ class SistemaDictamenesVC(ctk.CTk):
         # Línea separadora
         separador = ctk.CTkFrame(main_frame, fg_color=STYLE["borde"], height=1)
         separador.pack(fill="x", padx=25, pady=(0, 10))
+        # Mostrar advertencias de firmas (si vienen en los datos)
+        try:
+            if datos and isinstance(datos, dict) and datos.get('firma_warnings'):
+                fw = str(datos.get('firma_warnings') or '')
+                if fw:
+                    try:
+                        warn_frame = ctk.CTkFrame(main_frame, fg_color='transparent')
+                        warn_frame.pack(fill='x', padx=25, pady=(0, 8))
+                        ctk.CTkLabel(warn_frame, text=f"⚠️ {fw}", font=FONT_SMALL, text_color=STYLE.get('advertencia', '#ff1500'), wraplength=1100, anchor='w').pack(anchor='w')
+                    except Exception:
+                        pass
+        except Exception:
+            pass
         
         # Frame para contenido principal con scroll
         content_scroll = ctk.CTkScrollableFrame(
@@ -11172,7 +11577,7 @@ class SistemaDictamenesVC(ctk.CTk):
         selected_address_raw = {}
         # Cargar listas de normas e inspectores para helpers del modal
         try:
-            normas_path = os.path.join(APP_DIR, 'data', 'Normas.json')
+            normas_path = os.path.join(DATA_DIR, 'Normas.json')
             if os.path.exists(normas_path):
                 with open(normas_path, 'r', encoding='utf-8') as nf:
                     normas_data = json.load(nf)
@@ -11183,7 +11588,7 @@ class SistemaDictamenesVC(ctk.CTk):
             normas_list = []
 
         try:
-            firmas_path = os.path.join(APP_DIR, 'data', 'Firmas.json')
+            firmas_path = os.path.join(DATA_DIR, 'Firmas.json')
             if os.path.exists(firmas_path):
                 with open(firmas_path, 'r', encoding='utf-8') as ff:
                     firmas_data = json.load(ff)
@@ -12487,19 +12892,118 @@ class SistemaDictamenesVC(ctk.CTk):
                                     v = r.get(firma_col)
                                     if v not in (None, ''):
                                         found_codes.add(str(v).strip())
+                        # Additionally, as a robust fallback, collect ALL distinct non-empty values
+                        # from any plausible FIRMA column in the tabla_de_relacion so the preview
+                        # reflects every signature present in the source data.
+                        try:
+                            for c_try in ('FIRMA', 'Firma', 'firma', 'CODIGO_FIRMA', 'INSPECTOR', 'Inspector', 'inspector'):
+                                if c_try in df_rel.columns:
+                                    try:
+                                        vals = df_rel[c_try].dropna().astype(str).str.strip()
+                                        for vv in vals.unique():
+                                            if vv and str(vv).strip().lower() != 'nan':
+                                                found_codes.add(str(vv).strip())
+                                    except Exception:
+                                        continue
+                        except Exception:
+                            pass
                 # Preparar reporte de firmas
-                if found_codes:
-                    norma_req = None
-                    # intentar extraer norma desde los datos
-                    for k in ('NORMA UVA', 'NORMA', 'NORMA_UVA'):
-                        if any(k in it and it.get(k) not in (None, '') for it in (datos or [])):
-                            norma_req = next((it.get(k) for it in (datos or []) if it.get(k) not in (None, '')), None)
-                            break
+                # Normalize and try to map found tokens to known firma CODES so validation succeeds
+                try:
+                    import unicodedata, difflib
+                    def _norm_token(s):
+                        try:
+                            s2 = str(s or '').strip().upper()
+                            s2 = unicodedata.normalize('NFKD', s2)
+                            s2 = ''.join(ch for ch in s2 if not unicodedata.combining(ch))
+                            # keep only alphanumerics for matching
+                            s2 = ''.join(ch for ch in s2 if ch.isalnum())
+                            return s2
+                        except Exception:
+                            return str(s or '').strip().upper()
 
-                    # Si no vino desde los datos, intentar extraer CLASIF_UVA desde la tabla de relación
+                    norm_code_map = {}
+                    norm_name_map = {}
                     try:
-                        if not norma_req and df_rel is not None and not df_rel.empty and 'solicitud_col' in locals():
-                            clasif_vals = set()
+                        for c_code, info in (firmas_map or {}).items():
+                            try:
+                                nk = _norm_token(c_code)
+                                if nk:
+                                    norm_code_map[nk] = c_code
+                                nombre = (info.get('nombre') or info.get('NOMBRE DE INSPECTOR') or '')
+                                nn = _norm_token(nombre)
+                                if nn and nn not in norm_name_map:
+                                    norm_name_map[nn] = c_code
+                                # also index name parts (surnames / tokens)
+                                for part in str(nombre).split():
+                                    p = _norm_token(part)
+                                    if p and p not in norm_name_map:
+                                        norm_name_map[p] = c_code
+                            except Exception:
+                                continue
+                    except Exception:
+                        norm_code_map = {}
+                        norm_name_map = {}
+
+                    mapped_by_token = {}
+                    suggestions_by_token = {}
+                    effective_codes = set()
+                    for tok in list(found_codes):
+                        try:
+                            nt = _norm_token(tok)
+                            mapped = None
+                            if nt in norm_code_map:
+                                mapped = norm_code_map[nt]
+                            elif nt in norm_name_map:
+                                mapped = norm_name_map[nt]
+                            else:
+                                # try fuzzy against known normalized keys
+                                pool = list(norm_code_map.keys()) + list(norm_name_map.keys())
+                                if pool:
+                                    close = difflib.get_close_matches(nt, pool, n=2, cutoff=0.78)
+                                    if close:
+                                        k = close[0]
+                                        mapped = norm_code_map.get(k) or norm_name_map.get(k)
+                                        # record suggestion as human-readable name if available
+                                        if mapped:
+                                            suggestions_by_token[tok] = [ (firmas_map.get(mapped) or {}).get('nombre') or mapped ]
+                            if mapped:
+                                mapped_by_token[tok] = mapped
+                                effective_codes.add(mapped)
+                            else:
+                                # keep original token so it still appears in report as unknown
+                                effective_codes.add(tok)
+                        except Exception:
+                            effective_codes.add(tok)
+
+                    # Replace found_codes with effective mapped codes for downstream validation
+                    try:
+                        found_codes = set(effective_codes)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+
+                if found_codes:
+                    # Construir lista de normas requeridas (puede haber varias)
+                    norma_reqs = []
+                    # intentar extraer todas las normas desde los datos
+                    try:
+                        for k in ('NORMA UVA', 'NORMA', 'NORMA_UVA'):
+                            for it in (datos or []):
+                                try:
+                                    v = it.get(k)
+                                except Exception:
+                                    v = None
+                                if v not in (None, ''):
+                                    norma_reqs.append(str(v).strip())
+                    except Exception:
+                        pass
+
+                    # Si no vino desde los datos o hay clasificaciones adicionales, intentar extraer CLASIF_UVA desde la tabla de relación
+                    try:
+                        clasif_vals = set()
+                        if df_rel is not None and not df_rel.empty and 'solicitud_col' in locals():
                             for sol in (solicitudes_by_sol.keys()):
                                 try:
                                     matches = df_rel[df_rel[solicitud_col].astype(str).str.strip() == str(sol).strip()]
@@ -12513,54 +13017,310 @@ class SistemaDictamenesVC(ctk.CTk):
                                                 clasif_vals.add(str(v).strip())
                                 except Exception:
                                     continue
-                            if clasif_vals:
-                                # intentar mapear a NOM completo usando cargar_normas
-                                try:
-                                    normas_map, normas_info = cargar_normas()
-                                except Exception:
-                                    normas_map, normas_info = ({}, {})
-                                mapped = []
-                                import re
-                                for cv in sorted(clasif_vals):
-                                    nums = re.findall(r"\d+", cv)
-                                    nom_text = cv
-                                    if nums:
-                                        num = nums[0]
-                                        try:
-                                            if num in normas_map:
-                                                nom_text = normas_map.get(num)
-                                        except Exception:
-                                            pass
-                                    mapped.append(nom_text)
-                                norma_req = ', '.join(sorted(set(mapped)))
+                        if clasif_vals:
+                            try:
+                                normas_map, normas_info = cargar_normas()
+                            except Exception:
+                                normas_map, normas_info = ({}, {})
+                            import re
+                            for cv in sorted(clasif_vals):
+                                nums = re.findall(r"\d+", cv)
+                                nom_text = cv
+                                if nums:
+                                    num = nums[0]
+                                    try:
+                                        if num in normas_map:
+                                            nom_text = normas_map.get(num)
+                                    except Exception:
+                                        pass
+                                norma_reqs.append(nom_text)
                     except Exception:
                         pass
 
+                    # Normalizar y deduplicar
+                    try:
+                        norma_reqs = [str(n).strip() for n in norma_reqs if n and str(n).strip()]
+                        # preservar orden pero eliminar duplicados
+                        seen = set()
+                        uniq_norms = []
+                        for n in norma_reqs:
+                            if n not in seen:
+                                seen.add(n)
+                                uniq_norms.append(n)
+                        norma_reqs = uniq_norms
+                    except Exception:
+                        norma_reqs = []
+
                     any_accredited = False
+                    any_no = False
                     lines.append('')
                     lines.append('✍️ Firma(s) detectada(s):')
-                    for code in sorted(found_codes):
+
+                    # construir mapa norma_num -> códigos de firma asignados según los registros
+                    # Usamos la representación NUMÉRICA principal de la norma (ej. '50') como clave
+                    import re as _re
+                    def _norm_to_num(s):
                         try:
-                            nombre, img, ok = validar_acreditacion_inspector(code, str(norma_req) if norma_req else '', firmas_map)
+                            ss = str(s or "").strip()
+                            nums = _re.findall(r"\d+", ss)
+                            return nums[0] if nums else ss
                         except Exception:
-                            nombre, img, ok = (None, None, False)
-                        display_name = nombre if nombre else code
-                        status = '✅ Acreditado' if ok else '❌ NO acreditado'
-                        if norma_req:
-                            lines.append(f" - {display_name} ({code}): {status}  · Norma: {norma_req}")
+                            return str(s or "")
+
+                    assigned_by_norm = {}
+                    # prefill keys from norma_reqs normalized
+                    if norma_reqs:
+                        for nr in norma_reqs:
+                            assigned_by_norm[_norm_to_num(nr)] = set()
+                    try:
+                        # cargar normas para mapear clasif numérica a texto si hace falta
+                        try:
+                            normas_map_tmp, normas_info_tmp = cargar_normas()
+                        except Exception:
+                            normas_map_tmp, normas_info_tmp = ({}, {})
+
+                        # claves posibles donde aparece la norma en cada registro
+                        norma_keys = ('NORMA UVA', 'NORMA', 'NORMA_UVA', 'CLASIF UVA', 'CLASIF_UVA', 'CLASIFUVA')
+                        # claves posibles donde aparece el código de firma/inspector en el registro
+                        firma_keys_all = ['FIRMA', 'Firma', 'firma', 'CODIGO_FIRMA', 'INSPECTOR', 'Inspector', 'inspector']
+
+                        for it in (datos or []):
+                            # determinar norma del registro (normalizar extrayendo número principal)
+                            found_norm_text = None
+                            found_norm_num = None
+                            for nk in norma_keys:
+                                try:
+                                    v = it.get(nk)
+                                except Exception:
+                                    v = None
+                                if v not in (None, ''):
+                                    # si viene como número/clasif, mapear a texto usando normas_map_tmp
+                                    s = str(v).strip()
+                                    # intentar extraer número si es tipo '24' o 'NOM-24-...'
+                                    import re
+                                    nums = re.findall(r"\d+", s)
+                                    if nums:
+                                        num = nums[0]
+                                        found_norm_num = num
+                                        try:
+                                            if num in normas_map_tmp:
+                                                found_norm_text = normas_map_tmp.get(num)
+                                            else:
+                                                found_norm_text = s
+                                        except Exception:
+                                            found_norm_text = s
+                                    else:
+                                        found_norm_text = s
+                                        found_norm_num = _norm_to_num(s)
+                                    break
+
+                            if not found_norm_text:
+                                continue
+
+                            # buscar códigos de firma en el registro
+                            for fk in firma_keys_all:
+                                try:
+                                    val = it.get(fk)
+                                except Exception:
+                                    val = None
+                                if val not in (None, ''):
+                                    cand = str(val).strip()
+                                    if cand:
+                                        # asignar al mapa usando la clave numérica
+                                        key = found_norm_num if found_norm_num is not None else _norm_to_num(found_norm_text)
+                                        if key in assigned_by_norm:
+                                            assigned_by_norm[key].add(cand)
+
+                    except Exception:
+                        # en caso de fallo, no interrumpir; assigned_by_norm puede quedar vacío
+                        pass
+
+                    # mapa para saber si cada norma tiene al menos una firma acreditada
+                    norm_ok = {nr: False for nr in norma_reqs} if norma_reqs else {}
+
+                    # Evaluar por norma: iterar por cada registro y mostrar por cada fila
+                    # el inspector, el código de firma y la norma asociada (permitiendo repeticiones).
+                    printed_codes = set()
+                    # flags por norma para determinar si hubo evaluación y si alguna fue acreditada
+                    norm_evaluated = {nr: False for nr in (norma_reqs or [])}
+                    norm_ok = {nr: False for nr in (norma_reqs or [])} if norma_reqs else {}
+
+                    # claves posibles donde aparece el código de firma/inspector en el registro
+                    firma_keys_all = ['FIRMA', 'Firma', 'firma', 'CODIGO_FIRMA', 'INSPECTOR', 'Inspector', 'inspector']
+                    import re as _re
+
+                    # colecciones para deduplicar salidas pero mantener evaluación completa
+                    seen_entries = set()
+                    # cada elemento será tupla: (display_name, code, display_norm, ok)
+                    output_entries = []
+
+                    for it in (datos or []):
+                        # determinar norma del registro (normalizar extrayendo número principal)
+                        found_norm_text = None
+                        found_norm_num = None
+                        for nk in ('NORMA UVA', 'NORMA', 'NORMA_UVA', 'CLASIF UVA', 'CLASIF_UVA', 'CLASIFUVA'):
+                            try:
+                                v = it.get(nk)
+                            except Exception:
+                                v = None
+                            if v not in (None, ''):
+                                s = str(v).strip()
+                                nums = _re.findall(r"\d+", s)
+                                if nums:
+                                    num = nums[0]
+                                    found_norm_num = num
+                                    try:
+                                        if num in normas_map_tmp:
+                                            found_norm_text = normas_map_tmp.get(num)
+                                        else:
+                                            found_norm_text = s
+                                    except Exception:
+                                        found_norm_text = s
+                                else:
+                                    found_norm_text = s
+                                    found_norm_num = _norm_to_num(s)
+                                break
+
+                        if not found_norm_text:
+                            continue
+
+                        # preparar texto de requisito para validación (preferir mapa de normas si existe)
+                        try:
+                            req_text = normas_map_tmp.get(str(found_norm_num), str(found_norm_text)) if 'normas_map_tmp' in locals() else str(found_norm_text)
+                        except Exception:
+                            req_text = str(found_norm_text)
+
+                        # extraer códigos de firma de la fila (permitir múltiples separados por , ; / | )
+                        codes_in_row = []
+                        for fk in firma_keys_all:
+                            try:
+                                val = it.get(fk)
+                            except Exception:
+                                val = None
+                            if val not in (None, ''):
+                                s = str(val)
+                                parts = [p.strip() for p in _re.split(r"[,;/|]+", s) if p and p.strip()]
+                                for p in parts:
+                                    if p:
+                                        codes_in_row.append(p)
+
+                        if not codes_in_row:
+                            # marcar norma como no evaluada si no hay códigos en esta fila
+                            continue
+
+                        # para cada código encontrado en esta fila, validar y preparar salida (no hacemos break)
+                        for code in codes_in_row:
+                            try:
+                                nombre, img, ok = (None, None, False)
+                                try:
+                                    nombre, img, ok = validar_acreditacion_inspector(code, req_text, firmas_map)
+                                except Exception:
+                                    nombre, img, ok = (None, None, False)
+                                display_name = nombre if nombre else code
+                                # formar la representación de la norma a mostrar (usar found_norm_text)
+                                display_norm = found_norm_text
+
+                                # registrar resultados de evaluación para la norma
+                                if ok:
+                                    any_accredited = True
+                                    for nr in (norma_reqs or []):
+                                        if _norm_to_num(nr) == str(found_norm_num) or nr == found_norm_text:
+                                            norm_ok[nr] = True
+                                            norm_evaluated[nr] = True
+                                            break
+                                else:
+                                    for nr in (norma_reqs or []):
+                                        if _norm_to_num(nr) == str(found_norm_num) or nr == found_norm_text:
+                                            norm_evaluated[nr] = True
+                                            break
+
+                                # siempre añadir el código a printed_codes para indicar que fue procesado
+                                printed_codes.add(code)
+
+                                # preparar la línea de salida y añadirla sólo si no está ya registrada
+                                entry_key = (str(display_name).strip(), str(code).strip(), str(display_norm).strip())
+                                if entry_key not in seen_entries:
+                                    seen_entries.add(entry_key)
+                                    output_entries.append((display_name, code, display_norm, bool(ok)))
+                            except Exception:
+                                continue
+
+                    # agrupar por inspector+firma y listar normas en líneas indentadas para mejor legibilidad
+                    grouped = {}
+                    for name, code, norm, ok in output_entries:
+                        key = (name, code)
+                        grouped.setdefault(key, []).append((norm, ok))
+
+                    for (name, code), norms in grouped.items():
+                        # cabecera por inspector+firm3a
+                        lines.append(f" - {name} ({code}):")
+                        # listar normas atribuidas (una por línea, indentada)
+                        for norm, ok in norms:
+                            status = '✅ Acreditado' if ok else '❌ NO acreditado'
+                            lines.append(f"    • {status}  · Norma: {norm}")
+
+                    # después de procesar todas las filas, si alguna norma no fue evaluada o fue evaluada y ningún
+                    # código resultó acreditado, marcar estado NO
+                    for nr in (norma_reqs or []):
+                        if not norm_evaluated.get(nr, False):
+                            any_no = True
                         else:
-                            lines.append(f" - {display_name} ({code}): {status}")
-                        if ok:
-                            any_accredited = True
-                    # Si no hay firmas acreditadas, deshabilitar generación
+                            if not norm_ok.get(nr, False):
+                                any_no = True
+
+                    # Determinar estado final del botón: si aparece cualquier 'NO acreditado' -> bloquear.
+                    enabled = False
+                    try:
+                        if any_no:
+                            enabled = False
+                        else:
+                            if norma_reqs:
+                                enabled = all(bool(v) for v in norm_ok.values()) if norm_ok else False
+                            else:
+                                enabled = any_accredited
+                    except Exception:
+                        enabled = False
+
                     if hasattr(self, 'boton_generar_dictamen'):
                         try:
-                            if any_accredited:
-                                self.boton_generar_dictamen.configure(state='normal')
-                            else:
-                                self.boton_generar_dictamen.configure(state='disabled')
+                            self.boton_generar_dictamen.configure(state='normal' if enabled else 'disabled')
                         except Exception:
                             pass
+                    # Mostrar cualquier código/firma encontrada que no se haya listado aún
+                    try:
+                        remaining = set(found_codes) - printed_codes if found_codes else set()
+                        if remaining:
+                            lines.append('')
+                            lines.append('✍️ Firmas encontradas (sin norma específica):')
+                            for code in sorted(remaining):
+                                try:
+                                    # If possible, show accredited norms from the catalog instead of calling validator with empty req
+                                    info = (firmas_map.get(code) or {}) if isinstance(firmas_map, dict) else {}
+                                    nombre = info.get('nombre') or info.get('NOMBRE DE INSPECTOR') or None
+                                    normas_ac = info.get('normas_acreditadas') or info.get('Normas acreditadas') or []
+                                    display = nombre if nombre else code
+                                    if normas_ac:
+                                        lines.append(f" - {display} ({code}): Normas acreditadas: {', '.join(normas_ac)}")
+                                    else:
+                                        # fallback to validator to get a simple yes/no
+                                        try:
+                                            _, _, ok = validar_acreditacion_inspector(code, '', firmas_map)
+                                        except Exception:
+                                            ok = False
+                                        if ok:
+                                            lines.append(f" - {display} ({code}): ✅ Acreditado")
+                                        else:
+                                            sugg = ''
+                                            try:
+                                                if 'suggestions_by_token' in locals() and code in suggestions_by_token:
+                                                    sugg = f" (sugerencia: {', '.join(suggestions_by_token.get(code) or [])})"
+                                            except Exception:
+                                                sugg = ''
+                                            lines.append(f" - {display} ({code}): ❌ NO acreditado{sugg}")
+                                except Exception:
+                                            pass
+                    except Exception:
+                        pass
                 else:
                     lines.append('')
                     lines.append('✍️ Firma: (no detectada)')
@@ -12662,7 +13422,7 @@ class SistemaDictamenesVC(ctk.CTk):
                         # 2) Intentar con índice (index_indice.json)
                         # Respetar la preferencia de modo de pegado guardada por la UI
                         try:
-                            evidencia_cfg_path = os.path.join(APP_DIR, 'data', 'evidence_paths.json')
+                            evidencia_cfg_path = os.path.join(DATA_DIR, 'evidence_paths.json')
                             modo_cfg = ''
                             if os.path.exists(evidencia_cfg_path):
                                 try:
@@ -12971,8 +13731,6 @@ class SistemaDictamenesVC(ctk.CTk):
         except Exception:
             return {}
 
-
-
     def _save_evidence_path(self, group, path, mode=None):
         """Guarda la ruta `path` bajo la clave `group` en `data/evidence_paths.json`.
 
@@ -13068,7 +13826,7 @@ class SistemaDictamenesVC(ctk.CTk):
     # ------------------ PEGADO EVIDENCIAS (botones UI) ------------------
     def _run_script_and_notify(self, fn):
         import traceback
-        log_path = os.path.join(APP_DIR, 'data', 'pegado.log')
+        log_path = os.path.join(DATA_DIR, 'pegado.log')
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
         try:
             with open(log_path, 'a', encoding='utf-8') as lg:
